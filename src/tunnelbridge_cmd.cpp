@@ -2732,6 +2732,16 @@ static void GetTileDesc_TunnelBridge(TileIndex tile, TileDesc *td)
 				td->rail_speed = spd;
 			}
 		}
+				StationID st_index = _m[tile].m2;
+		if ((st_index != 0) && (st_index != INVALID_STATION)) {
+			td->str = STR_LAI_STATION_DESCRIPTION_RAILROAD_STATION;
+			// td->station_name = STR_LAI_STATION_DESCRIPTION_RAILROAD_STATION;
+			if (IsTunnel(tile)) {
+				td->station_name = STR_LAI_TUNNEL_DESCRIPTION_RAILROAD;
+			} else { // IsBridge(tile)
+				td->station_name = GetBridgeSpec(GetBridgeType(tile))->transport_name[tt];
+			}
+		}
 	}
 }
 
@@ -3081,6 +3091,16 @@ static void ChangeTileOwner_TunnelBridge(TileIndex tile, Owner old_owner, Owner 
 			SetTileOwner(tile, OWNER_NONE);
 		}
 	}
+
+static bool ClickTile_TunnelBridge(TileIndex tile)
+	{
+	if (IsTileType(tile, MP_TUNNELBRIDGE) && !(_m[tile].m2 == 0) && !(_m[tile].m2 == INVALID_STATION)) {
+		ClickTileProc *proc = _tile_type_procs[MP_STATION]->click_tile_proc;
+		if (proc == NULL) return false;
+		return proc(tile);
+	}
+	return true;
+	}
 }
 
 /**
@@ -3123,35 +3143,25 @@ static const uint8_t TUNNEL_SOUND_FRAME = 1;
  */
 extern const uint8_t _tunnel_visibility_frame[DIAGDIR_END] = {12, 8, 8, 12};
 
-extern const uint8_t _tunnel_turnaround_pre_visibility_frame[DIAGDIR_END] = {31, 27, 27, 31};
-
-static VehicleEnterTileStatus VehicleEnter_TunnelBridge(Vehicle *v, TileIndex tile, int x, int y)
+static VehicleEnterTileStatus VehicleEnter_TunnelBridge_Original(Vehicle* v, TileIndex tile, int x, int y)
 {
-	/* Direction into the wormhole */
-	const DiagDirection dir = GetTunnelBridgeDirection(tile);
-	/* New position of the vehicle on the tile */
-	int pos = (DiagDirToAxis(dir) == AXIS_X ? x - (TileX(tile) * TILE_SIZE) : y - (TileY(tile) * TILE_SIZE));
-	/* Number of units moved by the vehicle since entering the tile */
-	int frame = (dir == DIAGDIR_NE || dir == DIAGDIR_NW) ? TILE_SIZE - 1 - pos : pos;
-
-	if (frame > (int) TILE_SIZE || frame < 0) return VETSB_CANNOT_ENTER;
-	if (frame == TILE_SIZE) {
-		TileIndexDiffC offset = TileIndexDiffCByDiagDir(ReverseDiagDir(dir));
-		x += offset.x;
-		y += offset.y;
-	}
-
-	int z = GetSlopePixelZ(x, y, true) - v->z_pos;
+	int z = GetSlopePixelZ(x, y) - v->z_pos;
 
 	if (abs(z) > 2) return VETSB_CANNOT_ENTER;
+	/* Direction into the wormhole */
+	const DiagDirection dir = GetTunnelBridgeDirection(tile);
+	/* Direction of the vehicle */
+	const DiagDirection vdir = DirToDiagDir(v->direction);
+	/* New position of the vehicle on the tile */
+	byte pos = (DiagDirToAxis(vdir) == AXIS_X ? x : y) & TILE_UNIT_MASK;
+	/* Number of units moved by the vehicle since entering the tile */
+	byte frame = (vdir == DIAGDIR_NE || vdir == DIAGDIR_NW) ? TILE_SIZE - 1 - pos : pos;
 
 	if (IsTunnel(tile)) {
-		/* Direction of the vehicle */
-		const DiagDirection vdir = DirToDiagDir(v->direction);
 		if (v->type == VEH_TRAIN) {
 			Train *t = Train::From(v);
 
-			if (!(t->track & TRACK_BIT_WORMHOLE) && dir == vdir) {
+			if (t->track != TRACK_BIT_WORMHOLE && dir == vdir) {
 				if (t->IsFrontEngine() && frame == TUNNEL_SOUND_FRAME) {
 					if (!PlayVehicleSound(t, VSE_TUNNEL) && RailVehInfo(t->engine_type)->engclass == 0) {
 						SndPlayVehicleFx(SND_05_TRAIN_THROUGH_TUNNEL, v);
@@ -3161,21 +3171,17 @@ static VehicleEnterTileStatus VehicleEnter_TunnelBridge(Vehicle *v, TileIndex ti
 				if (frame == _tunnel_visibility_frame[dir]) {
 					t->tile = tile;
 					t->track = TRACK_BIT_WORMHOLE;
-					if (Tunnel::GetByTile(tile)->is_chunnel) SetBit(t->gv_flags, GVF_CHUNNEL_BIT);
 					t->vehstatus |= VS_HIDDEN;
-					t->UpdateIsDrawn();
 					return VETSB_ENTERED_WORMHOLE;
 				}
 			}
 
-			if (dir == ReverseDiagDir(vdir) && frame == (int) (_tunnel_visibility_frame[dir] - 1) && z == 0) {
+			if (dir == ReverseDiagDir(vdir) && frame == TILE_SIZE - _tunnel_visibility_frame[dir] && z == 0) {
 				/* We're at the tunnel exit ?? */
-				if (t->tile != tile && GetOtherTunnelEnd(t->tile) != tile) return VETSB_CONTINUE; // In chunnel
 				t->tile = tile;
 				t->track = DiagDirToDiagTrackBits(vdir);
 				assert(t->track);
 				t->vehstatus &= ~VS_HIDDEN;
-				t->UpdateIsDrawn();
 				return VETSB_ENTERED_WORMHOLE;
 			}
 		} else if (v->type == VEH_ROAD) {
@@ -3185,14 +3191,10 @@ static VehicleEnterTileStatus VehicleEnter_TunnelBridge(Vehicle *v, TileIndex ti
 			if (rv->state != RVSB_WORMHOLE && dir == vdir) {
 				if (frame == _tunnel_visibility_frame[dir]) {
 					/* Frame should be equal to the next frame number in the RV's movement */
-					assert_msg(frame == rv->frame + 1 || rv->frame == _tunnel_turnaround_pre_visibility_frame[dir],
-							"frame: %u, rv->frame: %u, dir: %u, _tunnel_turnaround_pre_visibility_frame[dir]: %u", frame, rv->frame, dir, _tunnel_turnaround_pre_visibility_frame[dir]);
+					assert(frame == rv->frame + 1);
 					rv->tile = tile;
-					rv->InvalidateImageCache();
 					rv->state = RVSB_WORMHOLE;
-					if (Tunnel::GetByTile(tile)->is_chunnel) SetBit(rv->gv_flags, GVF_CHUNNEL_BIT);
 					rv->vehstatus |= VS_HIDDEN;
-					rv->UpdateIsDrawn();
 					return VETSB_ENTERED_WORMHOLE;
 				} else {
 					return VETSB_CONTINUE;
@@ -3200,94 +3202,152 @@ static VehicleEnterTileStatus VehicleEnter_TunnelBridge(Vehicle *v, TileIndex ti
 			}
 
 			/* We're at the tunnel exit ?? */
-			if (dir == ReverseDiagDir(vdir) && frame == (int) (_tunnel_visibility_frame[dir] - 1) && z == 0) {
-				if (rv->tile != tile && GetOtherTunnelEnd(rv->tile) != tile) return VETSB_CONTINUE; // In chunnel
+			if (dir == ReverseDiagDir(vdir) && frame == TILE_SIZE - _tunnel_visibility_frame[dir] && z == 0) {
 				rv->tile = tile;
-				rv->InvalidateImageCache();
 				rv->state = DiagDirToDiagTrackdir(vdir);
-				rv->frame = TILE_SIZE - (frame + 1);
+				rv->frame = frame;
 				rv->vehstatus &= ~VS_HIDDEN;
-				rv->UpdateIsDrawn();
 				return VETSB_ENTERED_WORMHOLE;
 			}
+//  for Allow Ships to use Tunnels (Water-Tunnels or Rail-Tunnels for Ships)
+// Begin for Allow Ships to use Tunnels (Water-Tunnels or Rail-Tunnels for Ships)
+		} else if (v->type == VEH_SHIP) {
+			Ship* ship = Ship::From(v);
+
+			bool looks_like_2tiles_long_tunnel_entrance = false;
+			// bool looks_like_a_water_tunnel = false;
+			DiagDirection tunnelbridge_direction = dir; // GetTunnelBridgeDirection(tile);
+			TileIndexDiff delta = TileOffsByDiagDir(tunnelbridge_direction); // Direction into a tunnel (or bridge).
+			TileIndex next_tile_into_tunnel = tile + delta;
+			TileIndex next_tile_out_of_tunnel = tile - delta;
+			// WaterClass wac1 = GetWaterClass(tile); // This matters for drawing sprites, but here it doesn't matter. 
+			// Tunnel with the same Direction or Water but not coast (not shore):
+			// GetWaterClass(ti->tile) == WATER_CLASS_INVALID means not water but regular raailroad tunnel. 
+			// looks_like_a_water_tunnel = !(GetWaterClass(ti->tile) == WATER_CLASS_INVALID) &&
+			// Ignore WATER_CLASS_INVALID or WATER_CLASS_SEA ( == 0 - assume this a regular rail-tunnel, i.e. not a water-tunnel). 
+//			looks_like_a_water_tunnel = ((wac1 == WATER_CLASS_CANAL) || (wac1 == WATER_CLASS_RIVER)) &&
+//				(IsTileType(next_tile_forward, MP_TUNNELBRIDGE) && (GetTunnelBridgeDirection(next_tile_forward) == tunnelbridge_direction) ||
+//				 IsTileType(next_tile_forward, MP_WATER)); // && !HasBit(_m[next_tile_forward].m5, WBL_COAST_FLAG);
+//			looks_like_2tiles_long_tunnel_entrance = IsTileType(next_tile_forward, MP_TUNNELBRIDGE) && (GetTunnelBridgeDirection(next_tile_forward) == tunnelbridge_direction) ||
+//												IsTileType(next_tile_backward, MP_TUNNELBRIDGE) && (GetTunnelBridgeDirection(next_tile_backward) == tunnelbridge_direction);
+			looks_like_2tiles_long_tunnel_entrance = IsTileType(next_tile_into_tunnel, MP_TUNNELBRIDGE) && (GetTunnelBridgeDirection(next_tile_into_tunnel) == dir) ||
+												IsTileType(next_tile_out_of_tunnel, MP_TUNNELBRIDGE) && (GetTunnelBridgeDirection(next_tile_out_of_tunnel) == dir);
+
+			bool more_precision_to_visibility_frames_for_ships;
+
+			/* Enter tunnel? */
+			if (ship->state != TRACK_BIT_WORMHOLE && dir == vdir) {
+				// Experimental value of "frame" instead of _tunnel_visibility_frame[dir]:
+				// if (frame == _tunnel_visibility_frame[dir]) {
+				// if (!looks_like_2tiles_long_tunnel_entrance && (frame == 1) || looks_like_2tiles_long_tunnel_entrance && (frame == TILE_SIZE - 2)) {
+				// Hide ship not on the 1st, but on the 2nd of entrance tile of water-tunnel if (tunnelbridge_direction == DIAGDIR_NE || tunnelbridge_direction == DIAGDIR_NW)
+				// to avoid "teleport" visual effect. 
+//				more_precision_to_visibility_frames_for_ships = !looks_like_2tiles_long_tunnel_entrance && (frame == 1) ||
+//					looks_like_2tiles_long_tunnel_entrance && (tunnelbridge_direction == DIAGDIR_SE || tunnelbridge_direction == DIAGDIR_SW) && (frame == TILE_SIZE - 2) ||
+//					looks_like_2tiles_long_tunnel_entrance && (tunnelbridge_direction == DIAGDIR_NE || tunnelbridge_direction == DIAGDIR_NW) && !IsTileType(next_tile_forward, MP_TUNNELBRIDGE) && (frame == 1);
+				more_precision_to_visibility_frames_for_ships = (!looks_like_2tiles_long_tunnel_entrance) && (frame == 1) ||
+					looks_like_2tiles_long_tunnel_entrance && ((dir == DIAGDIR_SE || dir == DIAGDIR_SW) && (frame == TILE_SIZE - 2) ||
+														  (dir == DIAGDIR_NE || dir == DIAGDIR_NW) && (!IsTileType(next_tile_into_tunnel, MP_TUNNELBRIDGE)) && (frame == 4));
+				if (more_precision_to_visibility_frames_for_ships) {
+				// if (frame == 1) {
+				// if (frame == 1 || frame == 2) {   // 2 values (1 and 2) for bigger stability. 
+					/* Frame should be equal to the next frame number in the RV's movement */
+					// assert(frame == ship->frame + 1); // Error E0135: class "Ship" has no member "frame"
+					ship->tile = tile;
+					ship->state = TRACK_BIT_WORMHOLE;
+					ship->vehstatus |= VS_HIDDEN;
+					return VETSB_ENTERED_WORMHOLE;
+				} else {
+					return VETSB_CONTINUE;
+				}
+			}
+
+			/* We're at the tunnel exit ?? */
+			// Experimental value of "frame" instead of _tunnel_visibility_frame[dir]:
+			// if (dir == ReverseDiagDir(vdir) && frame == TILE_SIZE - _tunnel_visibility_frame[dir] && z == 0) {
+			// if (!looks_like_a_water_tunnel && (frame == 1) || looks_like_a_water_tunnel && (frame == TILE_SIZE - 1)) {
+//			if (!looks_like_2tiles_long_tunnel_entrance && (dir == ReverseDiagDir(vdir) && frame == TILE_SIZE - 1 && z == 0) ||
+//				 looks_like_2tiles_long_tunnel_entrance && !IsTileType(next_tile_forward, MP_TUNNELBRIDGE) && (dir == ReverseDiagDir(vdir) && frame == 2 && z == 0)) {
+//			more_precision_to_visibility_frames_for_ships = !looks_like_2tiles_long_tunnel_entrance && (frame == 1) ||
+//				looks_like_2tiles_long_tunnel_entrance && (tunnelbridge_direction == DIAGDIR_SE || tunnelbridge_direction == DIAGDIR_SW) && !IsTileType(next_tile_forward, MP_TUNNELBRIDGE) && (dir == ReverseDiagDir(vdir) && frame == 2 && z == 0) ||
+//				looks_like_2tiles_long_tunnel_entrance && (tunnelbridge_direction == DIAGDIR_NE || tunnelbridge_direction == DIAGDIR_NW) && (dir == ReverseDiagDir(vdir) && frame == TILE_SIZE - 2 && z == 0);
+			more_precision_to_visibility_frames_for_ships = (dir == ReverseDiagDir(vdir)) && ((!looks_like_2tiles_long_tunnel_entrance) && (frame == TILE_SIZE - 1) ||
+				looks_like_2tiles_long_tunnel_entrance && ((dir == DIAGDIR_SE || dir == DIAGDIR_SW) && (!IsTileType(next_tile_out_of_tunnel, MP_TUNNELBRIDGE)) && (frame == 3 && z == 0) ||
+														   (dir == DIAGDIR_NE || dir == DIAGDIR_NW) && (frame == TILE_SIZE - 4 && z == 0)));
+			if (more_precision_to_visibility_frames_for_ships) {
+				// if (dir == ReverseDiagDir(vdir) && frame == TILE_SIZE - 1 && z == 0) {
+			// if (dir == ReverseDiagDir(vdir) && (frame == TILE_SIZE - 1 || frame == TILE_SIZE - 2) && z == 0) {   // 2 values (1 and 2) for bigger stability.
+				// ship->tile = tile;
+				// ship->state = DiagDirToDiagTrackBits(vdir); // Make it visible, but not free from the wormhole. 
+				// ship->frame = frame; // Error E0135: class "Ship" has no member "frame"
+				ship->vehstatus &= ~VS_HIDDEN;
+				// return VETSB_ENTERED_WORMHOLE;
+				return VETSB_CONTINUE;
+			}
+			if ((!IsTileType(next_tile_out_of_tunnel, MP_TUNNELBRIDGE)) && (dir == ReverseDiagDir(vdir)) && (frame == TILE_SIZE - 8) && (z == 0)) {
+				ship->tile = tile;
+				// Change state on the last tile of 2-tiles-entrance (exit) only.
+				// Else the ship will behave criticaly stupid (it may turn back at the 1st of this 2 exit tiles and don't go out of the tunnel).
+				ship->state = DiagDirToDiagTrackBits(vdir); 
+				ship->vehstatus &= ~VS_HIDDEN; // Already done earlier. 
+				return VETSB_ENTERED_WORMHOLE;
+			}
+// End   for Allow Ships to use Tunnels (Water-Tunnels or Rail-Tunnels for Ships)
 		}
 	} else { // IsBridge(tile)
-		if (v->vehstatus & VS_HIDDEN) return VETSB_CONTINUE; // Building bridges between chunnel portals allowed.
 		if (v->type != VEH_SHIP) {
 			/* modify speed of vehicle */
-			uint16_t spd = GetBridgeSpec(GetBridgeType(tile))->speed;
+			uint16 spd = GetBridgeSpec(GetBridgeType(tile))->speed;
 
 			if (v->type == VEH_ROAD) spd *= 2;
 			Vehicle *first = v->First();
-			first->cur_speed = std::min(first->cur_speed, spd);
+			first->cur_speed = min(first->cur_speed, spd);
 		}
 
-		const Direction bridge_dir = DiagDirToDir(dir);
-		if (v->direction == bridge_dir) {
+		if (vdir == dir) {
+			/* Vehicle enters bridge at the last frame inside this tile. */
+			if (frame != TILE_SIZE - 1) return VETSB_CONTINUE;
 			switch (v->type) {
 				case VEH_TRAIN: {
-					/* Trains enter bridge at the first frame beyond this tile. */
-					if (frame != TILE_SIZE) return VETSB_CONTINUE;
 					Train *t = Train::From(v);
 					t->track = TRACK_BIT_WORMHOLE;
-					SetBit(t->First()->flags, VRF_CONSIST_SPEED_REDUCTION);
-
-					/* Do not call PrepareToEnterBridge because that also increments z_pos if
-					 * GVF_GOINGUP_BIT is set.
-					 * That is not required because this is occuring at frame == TILE_SIZE,
-					 * instead at TILE_SIZE - 1 */
 					ClrBit(t->gv_flags, GVF_GOINGUP_BIT);
 					ClrBit(t->gv_flags, GVF_GOINGDOWN_BIT);
 					break;
 				}
 
 				case VEH_ROAD: {
-					/* Non-train vehicles enter bridge at the last frame inside this tile. */
-					if (frame != TILE_SIZE - 1) return VETSB_CONTINUE;
 					RoadVehicle *rv = RoadVehicle::From(v);
-					if (IsRoadCustomBridgeHeadTile(tile)) {
-						RoadBits bits = ROAD_NONE;
-						if (HasRoadTypeRoad(tile) && HasBit(rv->compatible_roadtypes, GetRoadTypeRoad(tile))) bits |= GetCustomBridgeHeadRoadBits(tile, RTT_ROAD);
-						if (HasRoadTypeTram(tile) && HasBit(rv->compatible_roadtypes, GetRoadTypeTram(tile))) bits |= GetCustomBridgeHeadRoadBits(tile, RTT_TRAM);
-						if (!(bits & DiagDirToRoadBits(GetTunnelBridgeDirection(tile)))) return VETSB_CONTINUE;
-					}
-					rv->InvalidateImageCache();
 					rv->state = RVSB_WORMHOLE;
-					PrepareToEnterBridge(rv);
+					/* There are no slopes inside bridges / tunnels. */
+					ClrBit(rv->gv_flags, GVF_GOINGUP_BIT);
+					ClrBit(rv->gv_flags, GVF_GOINGDOWN_BIT);
 					break;
 				}
 
 				case VEH_SHIP:
-					/* Non-train vehicles enter bridge at the last frame inside this tile. */
-					if (frame != TILE_SIZE - 1) return VETSB_CONTINUE;
 					Ship::From(v)->state = TRACK_BIT_WORMHOLE;
 					break;
 
 				default: NOT_REACHED();
 			}
 			return VETSB_ENTERED_WORMHOLE;
-		} else if (v->direction == ReverseDir(bridge_dir)) {
+		} else if (vdir == ReverseDiagDir(dir)) {
+			v->tile = tile;
 			switch (v->type) {
 				case VEH_TRAIN: {
 					Train *t = Train::From(v);
-					if (t->track & TRACK_BIT_WORMHOLE) {
-						if (IsRailCustomBridgeHeadTile(tile)) {
-							return VETSB_ENTERED_WORMHOLE;
-						} else {
-							v->tile = tile;
-							t->track = DiagDirToDiagTrackBits(DirToDiagDir(v->direction));
-						}
+					if (t->track == TRACK_BIT_WORMHOLE) {
+						t->track = DiagDirToDiagTrackBits(vdir);
 						return VETSB_ENTERED_WORMHOLE;
 					}
 					break;
 				}
 
 				case VEH_ROAD: {
-					v->tile = tile;
 					RoadVehicle *rv = RoadVehicle::From(v);
 					if (rv->state == RVSB_WORMHOLE) {
-						rv->InvalidateImageCache();
-						rv->state = DiagDirToDiagTrackdir(DirToDiagDir(v->direction));
+						rv->state = DiagDirToDiagTrackdir(vdir);
 						rv->frame = 0;
 						return VETSB_ENTERED_WORMHOLE;
 					}
@@ -3295,10 +3355,9 @@ static VehicleEnterTileStatus VehicleEnter_TunnelBridge(Vehicle *v, TileIndex ti
 				}
 
 				case VEH_SHIP: {
-					v->tile = tile;
 					Ship *ship = Ship::From(v);
 					if (ship->state == TRACK_BIT_WORMHOLE) {
-						ship->state = DiagDirToDiagTrackBits(DirToDiagDir(v->direction));
+						ship->state = DiagDirToDiagTrackBits(vdir);
 						return VETSB_ENTERED_WORMHOLE;
 					}
 					break;
@@ -3306,35 +3365,25 @@ static VehicleEnterTileStatus VehicleEnter_TunnelBridge(Vehicle *v, TileIndex ti
 
 				default: NOT_REACHED();
 			}
-		} else if (v->type == VEH_TRAIN && IsRailCustomBridgeHeadTile(tile)) {
-			DirDiff dir_diff = DirDifference(v->direction, bridge_dir);
-			DirDiff reverse_dir_diff = DirDifference(v->direction, ReverseDir(bridge_dir));
-
-			if (dir_diff == DIRDIFF_45RIGHT || dir_diff == DIRDIFF_45LEFT) {
-				if (frame != TILE_SIZE) return VETSB_CONTINUE;
-
-				Train *t = Train::From(v);
-				TileIndex other = GetOtherTunnelBridgeEnd(tile);
-				if (GetTunnelBridgeLength(tile, other) == 0 && IsRailCustomBridgeHead(other))  {
-					t->track |= TRACK_BIT_WORMHOLE;
-				} else {
-					t->direction = bridge_dir;
-					t->track = TRACK_BIT_WORMHOLE;
-				}
-				SetBit(t->First()->flags, VRF_CONSIST_SPEED_REDUCTION);
-				ClrBit(t->gv_flags, GVF_GOINGUP_BIT);
-				ClrBit(t->gv_flags, GVF_GOINGDOWN_BIT);
-				return VETSB_ENTERED_WORMHOLE;
-			}
-			if (reverse_dir_diff == DIRDIFF_45RIGHT || reverse_dir_diff == DIRDIFF_45LEFT) {
-				Train *t = Train::From(v);
-				if (t->track & TRACK_BIT_WORMHOLE) return VETSB_ENTERED_WORMHOLE;
-			}
 		}
 	}
 	return VETSB_CONTINUE;
 }
 
+static VehicleEnterTileStatus VehicleEnter_TunnelBridge(Vehicle* v, TileIndex tile, int x, int y)
+{
+	// .._Original function = that was in openttd v. 1.9.1 source code. 
+	VehicleEnterTileStatus rr1 = VehicleEnter_TunnelBridge_Original(v, tile, x, y);
+	VehicleEnterTileStatus rr2;
+	// if (IsTileType(tile, MP_TUNNELBRIDGE) && (GetTunnelBridgeTransportType(tile) == TRANSPORT_RAIL)) {
+	// if (GetTunnelBridgeTransportType(tile) == TRANSPORT_RAIL) {
+	if (v->type == VEH_TRAIN) {
+		rr2 = _tile_type_procs[MP_STATION]->vehicle_enter_tile_proc(v, tile, x, y);
+		return rr1 | rr2;
+	}
+	return rr1;
+}
+// End   for Existing objects tunnels and bridges as station
 static CommandCost TerraformTile_TunnelBridge(TileIndex tile, DoCommandFlag flags, int z_new, Slope tileh_new)
 {
 	if (_settings_game.construction.build_on_slopes && AutoslopeEnabled() && IsBridge(tile) && GetTunnelBridgeTransportType(tile) != TRANSPORT_WATER) {

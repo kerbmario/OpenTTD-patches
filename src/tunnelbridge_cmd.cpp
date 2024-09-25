@@ -453,6 +453,12 @@ CommandCost CmdBuildBridge(TileIndex end_tile, DoCommandFlag flags, uint32_t p1,
 	/* Aqueducts can't be built of flat land. */
 	if (transport_type == TRANSPORT_WATER && (tileh_start == SLOPE_FLAT || tileh_end == SLOPE_FLAT)) return_cmd_error(STR_ERROR_LAND_SLOPED_IN_WRONG_DIRECTION);
 	if (z_start != z_end) return_cmd_error(STR_ERROR_BRIDGEHEADS_NOT_SAME_HEIGHT);
+	//  for Existing objects tunnels and bridges as stations // 20190724: // 2nd stage: Allow users to convert objects via UI. 
+// Begin for Existing objects tunnels and bridges as stations 
+	bool is_new_bridge;
+	uint16 StationID_of_tile_start = _m[tile_start].m2;
+	uint16 StationID_of_tile_end = _m[tile_end].m2;
+// End   for Existing objects tunnels and bridges as stations 
 
 	CommandCost cost(EXPENSES_CONSTRUCTION);
 	Owner owner;
@@ -463,7 +469,7 @@ CommandCost CmdBuildBridge(TileIndex end_tile, DoCommandFlag flags, uint32_t p1,
 			GetOtherBridgeEnd(tile_start) == tile_end &&
 			GetTunnelBridgeTransportType(tile_start) == transport_type) {
 		/* Replace a current bridge. */
-
+		is_new_bridge = false;
 		/* If this is a railway bridge, make sure the railtypes match. */
 		if (transport_type == TRANSPORT_RAIL && GetRailType(tile_start) != railtype) {
 			return_cmd_error(STR_ERROR_MUST_DEMOLISH_BRIDGE_FIRST);
@@ -575,7 +581,7 @@ CommandCost CmdBuildBridge(TileIndex end_tile, DoCommandFlag flags, uint32_t p1,
 		is_upgrade = true;
 	} else {
 		/* Build a new bridge. */
-
+		is_new_bridge = true;
 		bool allow_on_slopes = (_settings_game.construction.build_on_slopes && transport_type != TRANSPORT_WATER);
 
 		/* Try and clear the start landscape */
@@ -725,9 +731,15 @@ CommandCost CmdBuildBridge(TileIndex end_tile, DoCommandFlag flags, uint32_t p1,
 			case TRANSPORT_RAIL:
 				if (is_upgrade) SubtractRailTunnelBridgeInfrastructure(tile_start, tile_end);
 				/* Add to company infrastructure count if required. */
-				MakeRailBridgeRamp(tile_start, owner, bridge_type, dir,                 railtype, is_upgrade);
-				MakeRailBridgeRamp(tile_end,   owner, bridge_type, ReverseDiagDir(dir), railtype, is_upgrade);
-				AddRailTunnelBridgeInfrastructure(tile_start, tile_end);
+				MakeRailBridgeRamp(tile_start, owner, bridge_type, dir,                 railtype);
+				MakeRailBridgeRamp(tile_end,   owner, bridge_type, ReverseDiagDir(dir), railtype);
+				if (!is_new_bridge) {
+					// For new bridges these parameters are determined in (static inline void) MakeBridgeRamp() in bridge_map.h .
+					_m[tile_start].m2 = StationID_of_tile_start;
+					_m[tile_end].m2 = StationID_of_tile_end;
+				}
+				SetTunnelBridgeReservation(tile_start, pbs_reservation);
+				SetTunnelBridgeReservation(tile_end,   pbs_reservation);
 				break;
 
 			case TRANSPORT_ROAD: {
@@ -1284,9 +1296,15 @@ static CommandCost DoClearTunnel(TileIndex tile, DoCommandFlag flags)
 				}
 				DirtyCompanyInfrastructureWindows(owner);
 			}
-
+			
 			delete Tunnel::GetByTile(tile);
-
+			CommandCost ret2;
+			ret2 = DoCommand(tile, 0, 0, DC_EXEC, CMD_REMOVE_FROM_RAIL_STATION);
+			if (ret2.Failed()) return ret2;
+			ret.AddCost(ret2.GetCost());
+			ret2 = DoCommand(endtile, 0, 0, DC_EXEC, CMD_REMOVE_FROM_RAIL_STATION);
+			if (ret2.Failed()) return ret2;
+			ret.AddCost(ret2.GetCost());
 			DoClearSquare(tile);
 			DoClearSquare(endtile);
 
@@ -1420,6 +1438,13 @@ static CommandCost DoClearBridge(TileIndex tile, DoCommandFlag flags)
 				TraceRestrictNotifySignalRemoval(tile, FindFirstTrack(GetAcrossTunnelBridgeTrackBits(tile)));
 				TraceRestrictNotifySignalRemoval(endtile, FindFirstTrack(GetAcrossTunnelBridgeTrackBits(endtile)));
 			}
+			CommandCost ret2;
+			ret2 = DoCommand(tile, 0, 0, DC_EXEC, CMD_REMOVE_FROM_RAIL_STATION);
+			if (ret2.Failed()) return ret2;
+			ret.AddCost(ret2.GetCost());
+			ret2 = DoCommand(endtile, 0, 0, DC_EXEC, CMD_REMOVE_FROM_RAIL_STATION);
+			if (ret2.Failed()) return ret2;
+			ret.AddCost(ret2.GetCost());
 		} else if (GetTunnelBridgeTransportType(tile) == TRANSPORT_ROAD) {
 			SubtractRoadTunnelBridgeInfrastructure(tile, endtile);
 			if (RoadLayoutChangeNotificationEnabled(false)) {
